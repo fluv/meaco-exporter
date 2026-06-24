@@ -107,17 +107,19 @@ def _read_status() -> dict[str, Any]:
 
 
 def _poll_once() -> None:
-    global _reachable, _last_poll
+    global _reachable, _last_poll, _device
     try:
         with _device_lock:
             dps = _read_status()
     except Exception as e:
         log.warning("poll failed: %s", e)
+        # Two separate, sequential critical sections — never nested. No code
+        # path in this module holds _device_lock and _state_lock at the same
+        # time, so there is no lock-ordering hazard between the poller and the
+        # control handler.
         with _state_lock:
             _reachable = False
-        # Force a fresh connection next time.
-        with _device_lock:
-            global _device
+        with _device_lock:  # force a fresh connection on the next poll
             _device = None
         return
     with _state_lock:
