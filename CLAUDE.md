@@ -6,12 +6,14 @@ wrong.
 
 ## Surprising things
 
-- **The protocol version isn't in the Tuya console.** Confirm it empirically
-  with `--probe`. Default is `3.3`; a decode error means try `3.4` then `3.5`.
-- **A probe timeout almost always means the unit is switched off at the wall,
-  not that anything is broken.** A powered-down Tuya device makes port `6668`
-  show as `filtered`. It's a dehumidifier — it's off for most of the year. Don't
-  go chasing a connectivity bug before checking it's plugged in and on.
+- **The protocol version isn't in the Tuya console.** This unit is `3.5`
+  (`tinytuya scan` reports it); the code default is `3.3`. A wrong version *or* a
+  bad local key both surface identically as tinytuya error `914` in the logs.
+- **A connection timeout in the logs — as opposed to `914` — means the unit is
+  switched off at the wall, not that anything is broken.** A powered-down Tuya
+  device makes port `6668` show as `filtered`. Check it's plugged in before
+  chasing a connectivity bug. (`914` is the opposite signal: it connected, but
+  the key or version is wrong.)
 - **The local key can rotate on a device firmware update.** A deployment that
   was working and then starts timing out after an update needs the key
   re-fetched, not a code change.
@@ -25,9 +27,12 @@ wrong.
 ## Ways of working
 
 - **The local key is a device credential.** It lives only in the Kubernetes
-  secret — never in a commit, PR, issue, or chat. Bring-up validation runs
-  *inside* the running pod (`--probe`) specifically so the key never leaves the
-  cluster.
+  secret — never in a commit, PR, issue, or chat.
+- **Bring-up is read from the pod logs, not `exec`.** The `claude` service
+  account has no `exec`/`scale`/`patch` in `lifestyle` — only `get`/`logs` (see
+  fluv/kube#673). Confirm a connection by watching the logs for the `914`
+  warnings to stop; success is silent. Read live state with the `meaco-status`
+  script. The `--probe` flag exists but needs `exec`, so it's a human-only path.
 - **Never nest the two locks.** One guards device I/O, the other the cached
   state; every path takes one and releases it before taking the other. Nesting
   them is the one thing that *would* create a deadlock — a cold review once
