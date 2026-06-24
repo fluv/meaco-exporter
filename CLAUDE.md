@@ -1,97 +1,42 @@
 # CLAUDE.md — meaco-exporter
 
-Prometheus exporter and local control for a single Meaco Arete Two dehumidifier,
-spoken to over the Tuya LAN protocol via `tinytuya`. No Tuya cloud at runtime.
-Deployed to the `lifestyle` namespace of the homelab k3s cluster, pinned to the
-Pi node so it can reach the device on the home LAN.
+What it is and how to use it lives in the README. This file is only the things
+that aren't obvious from the code and the ways of working that are easy to get
+wrong.
 
-## Architecture
+## Surprising things
 
-Single module, `meaco_exporter.py`, no framework:
+- **The protocol version isn't in the Tuya console.** Confirm it empirically
+  with `--probe`. Default is `3.3`; a decode error means try `3.4` then `3.5`.
+- **A probe timeout almost always means the unit is switched off at the wall,
+  not that anything is broken.** A powered-down Tuya device makes port `6668`
+  show as `filtered`. It's a dehumidifier — it's off for most of the year. Don't
+  go chasing a connectivity bug before checking it's plugged in and on.
+- **The local key can rotate on a device firmware update.** A deployment that
+  was working and then starts timing out after an update needs the key
+  re-fetched, not a code change.
+- **This model has no temperature and no fan-speed data point.** Mode covers fan
+  behaviour; room temperature is the Awair sensors' job. Don't add metrics for
+  data the device doesn't expose.
+- **The DPS map is borrowed, not reverse-engineered.** It comes from
+  make-all/tuya-local's `meaco_aretetwo` device definition. If a data point
+  behaves unexpectedly, check upstream there before assuming the device is odd.
 
-- A **poller thread** calls `tinytuya` `status()` every `POLL_INTERVAL` seconds
-  and caches the raw DPS dict.
-- A **stdlib `HTTPServer`** serves `GET /metrics` (renders the cache as
-  Prometheus text — hand-rolled, no `prometheus_client` dependency) and
-  `POST /control` (validates and applies writes).
-- `--probe` does a single synchronous `status()` read and prints the DPS, for
-  bring-up.
+## Ways of working
 
-Layout mirrors `fluv/lgtv-exporter`; the deploy mirrors `fluv/kube`'s
-`lifestyle/lgtv-exporter.yaml`.
-
-### Lock discipline
-
-Two locks: `_device_lock` guards all `tinytuya` socket I/O (the library is not
-safe for concurrent use); `_state_lock` guards the cached DPS dict and flags.
-
-**They are never held simultaneously.** Every path takes one, releases it, then
-takes the other — sequential `with` blocks, never nested. This is deliberate and
-load-bearing: it means there is no lock-ordering relationship to get wrong, so no
-deadlock is possible between the poller and the control handler. Keep it that
-way. (A cold review once flagged a nested-lock deadlock here — it had misread the
-sequential blocks. Don't nest them and the question never arises.)
-
-## DPS map (Meaco Arete Two)
-
-Taken from [make-all/tuya-local](https://github.com/make-all/tuya-local)'s
-`custom_components/tuya_local/devices/meaco_aretetwo_dehumidifier.yaml`. This is
-the device-specific knowledge that makes the whole thing work — preserve the
-provenance.
-
-| DPS | Name | Type | Notes |
-|---|---|---|---|
-| 1 | switch | bool | power on/off |
-| 2 | humidity | int | target setpoint, 35–70, step 5 |
-| 4 | mode | str | `manual` / `laundry` / `sleep` / `purify` |
-| 14 | lock | bool | child lock |
-| 16 | current_humidity | int | measured room humidity (the reading) |
-| 17 | timer | str | off-timer |
-| 18 | time_remaining | int | hours left on active timer |
-| 19 | status | bitfield | bit0 tank full, bit1 defrost, bit7 moisture |
-| 101 | on_timer | str | on-timer |
-
-This model exposes **no temperature** and **no separate fan-speed** DPS — mode
-covers fan behaviour, and room temperature comes from the Awair sensors. Don't
-invent metrics for them.
-
-## Configuration
-
-All via environment (see the module docstring for the full list). Required:
-`MEACO_IP`, `MEACO_DEVICE_ID`, `MEACO_LOCAL_KEY`. `MEACO_VERSION` defaults to
-`3.3`.
-
-The **device ID and local key live only in a Kubernetes secret**
-(`meaco-local-key` in `lifestyle`, keys `device-id` / `local-key`). The local key
-is a device credential — never commit it, never print it, never paste it into a
-PR/issue/chat. Only the LAN IP goes in the deploy manifest as plaintext.
-
-## Build & CI
-
-`pyproject.toml` carries the version; the `Build and push` workflow builds a
-multi-arch image to `ghcr.io/fluv/meaco-exporter` and cuts a release when the
-version is new. **Bump the version in `pyproject.toml` for any source/Docker
-change** (the DeepSeek reviewer enforces this).
-
-## Bring-up
-
-The protocol version is not knowable from the Tuya console — confirm it
-empirically. Once deployed, exec the probe (the key stays in the cluster):
-
-```sh
-kubectl -n lifestyle exec deploy/meaco-exporter -- python3 meaco_exporter.py --probe
-```
-
-- A clean DPS dump → version and key are correct; map the keys against the table.
-- A timeout → the device isn't answering on `6668`. Most likely it's **switched
-  off at the wall** (port shows `filtered` when the unit is unpowered). Some Tuya
-  firmware updates also disable local control entirely; if the unit is on and
-  6668 is still filtered, local control may be gone and the cloud API is the
-  fallback.
-- A decode error → wrong `MEACO_VERSION`; try `3.4` then `3.5`.
-
-Local keys can rotate on device firmware update — if a previously-working
-deployment starts timing out after an update, re-fetch the key.
+- **The local key is a device credential.** It lives only in the Kubernetes
+  secret — never in a commit, PR, issue, or chat. Bring-up validation runs
+  *inside* the running pod (`--probe`) specifically so the key never leaves the
+  cluster.
+- **Never nest the two locks.** One guards device I/O, the other the cached
+  state; every path takes one and releases it before taking the other. Nesting
+  them is the one thing that *would* create a deadlock — a cold review once
+  flagged exactly that, having misread the sequential blocks as nested. Keep
+  them sequential and there is no lock order to get wrong.
+- **Bump the version in `pyproject.toml` for any source or Docker change.** The
+  DeepSeek reviewer blocks merge otherwise.
+- Reviews come from the DeepSeek bot; this is one of the DS-reviewed repos where
+  bot approval is sufficient to merge.
 
 ## Related
 
